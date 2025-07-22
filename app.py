@@ -16,6 +16,9 @@ TILITER_URL = "https://api.ai.vision.tiliter.com/api/v1/inference/receipt-proces
 # Redis via Upstash HTTP client
 redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
 
+# Track event IDs to avoid duplicates
+processed_events = set()
+
 @app.route("/")
 def health():
     return "Slack bot is running.", 200
@@ -29,75 +32,71 @@ def slack_events():
     if data.get("type") == "url_verification":
         return make_response(data["challenge"], 200, {"Content-Type": "text/plain"})
 
+    event_id = data.get("event_id")
+    if event_id in processed_events:
+        return make_response("Duplicate", 200)
+    processed_events.add(event_id)
+
     event = data.get("event", {})
     user_id = event.get("user")
     event_type = event.get("type")
-    ts = event.get("ts")
-    channel = event.get("channel")
 
-    if not user_id:
-        return make_response("No user ID", 200)
+    if not user_id or event.get("bot_id"):
+        return make_response("Ignored bot/system event", 200)
 
     api_key = redis.get(f"key:{user_id}")
-
-    if api_key is None:
-        if "bot_id" in event:
-            return make_response("Ignore bot message", 200)
-
-        warn_key = f"warned:{user_id}:{ts}"
+    if not api_key:
+        warn_key = f"warned:{user_id}:{event.get('ts')}"
         if not redis.get(warn_key):
             redis.set(warn_key, "1", ex=3600)
             post_to_slack(
-                channel,
-                ts,
-                ":warning: You haven’t set your Tiliter API key yet.\n\nPlease visit https://ai.vision.tiliter.com and use `/set-apikey YOUR_KEY` to set it."
+                event.get("channel"),
+                event.get("ts"),
+                ":warning: You haven’t set your Tiliter API key yet.\n\nVisit https://ai.vision.tiliter.com to create an account and purchase credits.\nThen use `/set-apikey YOUR_KEY` to activate the bot."
             )
         return make_response("No API key", 200)
 
-    api_key = api_key
+    if isinstance(api_key, bytes):
+        api_key = api_key.decode()
 
     if data.get("type") == "event_callback":
         if event_type == "message" and 'files' in event:
-            if "bot_id" in event:
-                return make_response("Ignore own image post", 200)
-
-            dedup_key = f"processed:{user_id}:{ts}"
-            if redis.get(dedup_key):
-                print("⏩ Already processed this event.")
-                return make_response("Already processed", 200)
-
-            redis.set(dedup_key, "1", ex=3600)
-
             for file in event['files']:
                 if file.get('mimetype', '').startswith('image/'):
                     image_url = file['url_private']
+                    channel = event['channel']
+                    thread_ts = event['ts']
                     result = handle_image(image_url, api_key)
-                    post_to_slack(channel, ts, result)
+                    post_to_slack(channel, thread_ts, result)
 
     return make_response("OK", 200)
 
 @app.route("/set-apikey", methods=["POST"])
 def set_apikey():
-    data = request.form
-    user_id = data.get("user_id")
-    text = data.get("text")
-
-    if not user_id or not text:
-        return make_response("Missing user_id or API key", 400)
-
+    form = request.form
+    user_id = form.get("user_id")
+    text = form.get("text", "").strip()
+    if not text:
+        return make_response("❌ Please provide an API key like `/set-apikey YOUR_KEY`", 200)
     redis.set(f"key:{user_id}", text)
-    return make_response("✅ API key saved successfully.", 200)
+    return make_response("✅ Tiliter API key set successfully.", 200)
+
+@app.route("/get-apikey", methods=["POST"])
+def get_apikey():
+    form = request.form
+    user_id = form.get("user_id")
+    api_key = redis.get(f"key:{user_id}")
+    if api_key:
+        return make_response(f"🔑 Your current API key is: `{api_key}`", 200)
+    else:
+        return make_response("❌ No API key found. Use `/set-apikey YOUR_KEY` to add one.", 200)
 
 @app.route("/delete-apikey", methods=["POST"])
 def delete_apikey():
-    data = request.form
-    user_id = data.get("user_id")
-
-    if not user_id:
-        return make_response("Missing user_id", 400)
-
+    form = request.form
+    user_id = form.get("user_id")
     redis.delete(f"key:{user_id}")
-    return make_response("🗑️ Your Tiliter API key has been deleted.", 200)
+    return make_response("🗑️ Your Tiliter API key has been removed.", 200)
 
 def handle_image(image_url, api_key):
     print("⬇️ Downloading image from Slack...")
@@ -136,18 +135,15 @@ def handle_image(image_url, api_key):
         currency = result.get("currency", "")
 
         items = result.get("items", [])
-        item_lines = "\n".join([
-            f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}"
-            for item in items
-        ]) or ":x: No items found."
+        item_lines = "\n".join([f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}" for item in items]) or "_No items found_"
 
         return (
-            f"🧾 *Receipt Details:*\n"
+            f":receipt: *Receipt Details:*\n"
             f"- Merchant: *{merchant}*\n"
             f"- Date: *{date}*\n"
             f"- Total: *{total}{currency}*\n"
             f"- Address: {address}\n\n"
-            f"🛒 *Items:*\n{item_lines}"
+            f":shopping_trolley: *Items:*\n{item_lines}"
         )
 
     except Exception as e:
