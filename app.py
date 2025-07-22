@@ -38,12 +38,14 @@ def slack_events():
 
     api_key = redis.get(f"key:{user_id}")
     if api_key is None:
+    if event.get("type") == "file_shared":
         post_to_slack(
             event.get("channel"),
             event.get("ts"),
             ":warning: You haven’t set your Tiliter API key yet.\n\nPlease use `/register-key YOUR_KEY` to set it."
-        )
+            )
         return make_response("No API key", 200)
+
     api_key = api_key.decode()
 
     if data.get("type") == "event_callback":
