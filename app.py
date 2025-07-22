@@ -42,8 +42,8 @@ def slack_events():
         if "bot_id" in event:
             return make_response("Ignore bot message", 200)
 
-        # Use a composite key to avoid double-posting in same thread
-        warn_key = f"warned:{user_id}:{event.get('ts')}"
+        # Deduplicate warnings: 1 per user per hour
+        warn_key = f"warned:{user_id}"
         if not redis.get(warn_key):
             redis.set(warn_key, "1", ex=3600)
             post_to_slack(
@@ -53,9 +53,9 @@ def slack_events():
             )
         return make_response("No API key", 200)
 
+    # Already decoded by Upstash client
     if data.get("type") == "event_callback":
         if event_type == "message" and 'files' in event:
-            # Skip bot's own image messages
             if "bot_id" in event:
                 return make_response("Ignore own image post", 200)
 
@@ -74,13 +74,35 @@ def set_api_key():
     user_id = request.form.get("user_id")
     text = request.form.get("text", "").strip()
 
-    print(f"Received API key from {user_id}: {text}")
-
     if not user_id or not text:
         return make_response("❌ Please provide your API key like this:\n/set-apikey YOUR_KEY", 200)
 
     redis.set(f"key:{user_id}", text)
     return make_response("✅ Your Tiliter API key has been registered successfully.", 200)
+
+@app.route("/delete-apikey", methods=["POST"])
+def delete_api_key():
+    user_id = request.form.get("user_id")
+
+    if not user_id:
+        return make_response("❌ Could not identify your user ID.", 200)
+
+    redis.delete(f"key:{user_id}")
+    redis.delete(f"warned:{user_id}")
+    return make_response("🗑️ Your Tiliter API key has been deleted.", 200)
+
+@app.route("/get-apikey", methods=["POST"])
+def get_api_key():
+    user_id = request.form.get("user_id")
+
+    if not user_id:
+        return make_response("❌ Could not identify your user ID.", 200)
+
+    api_key = redis.get(f"key:{user_id}")
+    if not api_key:
+        return make_response("ℹ️ No API key found for your user.", 200)
+
+    return make_response(f"🔐 Your current API key is:\n```{api_key}```", 200)
 
 def handle_image(image_url, api_key):
     print("⬇️ Downloading image from Slack...")
