@@ -53,8 +53,6 @@ def slack_events():
             )
         return make_response("No API key", 200)
 
-    api_key = api_key.decode()
-
     if data.get("type") == "event_callback":
         if event_type == "message" and 'files' in event:
             # Skip bot's own image messages
