@@ -2,7 +2,6 @@ import os
 import json
 import base64
 import requests
-import threading
 from flask import Flask, request, make_response
 from upstash_redis import Redis
 
@@ -24,56 +23,50 @@ def health():
 @app.route("/events", methods=["POST"])
 def slack_events():
     data = request.json
-
-    # Respond immediately to avoid retry spam
-    response = make_response("OK", 200)
-    response.headers["Content-Type"] = "text/plain"
-
-    threading.Thread(target=handle_slack_event, args=(data,)).start()
-    return response
-
-def handle_slack_event(data):
-    print("📩 RAW EVENT DATA:")
+    print("📩 Incoming Slack event:")
     print(json.dumps(data, indent=2))
 
     if data.get("type") == "url_verification":
         return make_response(data["challenge"], 200, {"Content-Type": "text/plain"})
 
     event = data.get("event", {})
-    event_type = event.get("type")
     user_id = event.get("user")
-    channel = event.get("channel")
-    event_ts = event.get("ts")
+    event_type = event.get("type")
 
-    # Ignore bot messages only
-    if "bot_id" in event:
-        print("🔕 Ignoring bot message")
-        return
-
-    if not user_id or not channel or not event_ts:
-        return
+    if not user_id:
+        return make_response("No user ID", 200)
 
     api_key = redis.get(f"key:{user_id}")
+
     if api_key is None:
-        warn_key = f"warned:{user_id}"
+        # Avoid infinite loop by skipping bot messages
+        if event.get("subtype") == "bot_message":
+            return make_response("Ignore bot message", 200)
+
+        # Use a composite key to avoid double-posting in same thread
+        warn_key = f"warned:{user_id}:{event.get('ts')}"
         if not redis.get(warn_key):
             redis.set(warn_key, "1", ex=3600)
             post_to_slack(
-                channel,
-                event_ts,
+                event.get("channel"),
+                event.get("ts"),
                 ":warning: You haven’t set your Tiliter API key yet.\n\nPlease use `/register-key YOUR_KEY` to set it."
             )
-        return
+        return make_response("No API key", 200)
 
     api_key = api_key.decode()
 
-    # Process any message with image files
-    if event_type == "message" and 'files' in event:
-        for file in event['files']:
-            if file.get('mimetype', '').startswith('image/'):
-                image_url = file['url_private']
-                result = handle_image(image_url, api_key)
-                post_to_slack(channel, event_ts, result)
+    if data.get("type") == "event_callback":
+        if event_type == "message" and 'files' in event:
+            for file in event['files']:
+                if file.get('mimetype', '').startswith('image/'):
+                    image_url = file['url_private']
+                    channel = event['channel']
+                    thread_ts = event['ts']
+                    result = handle_image(image_url, api_key)
+                    post_to_slack(channel, thread_ts, result)
+
+    return make_response("OK", 200)
 
 def handle_image(image_url, api_key):
     print("⬇️ Downloading image from Slack...")
@@ -112,10 +105,7 @@ def handle_image(image_url, api_key):
         currency = result.get("currency", "")
 
         items = result.get("items", [])
-        item_lines = "\n".join([
-            f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}"
-            for item in items
-        ])
+        item_lines = "\n".join([f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}" for item in items])
 
         return (
             f"🧾 *Receipt Details:*\n"
