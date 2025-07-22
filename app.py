@@ -16,8 +16,8 @@ TILITER_URL = "https://api.ai.vision.tiliter.com/api/v1/inference/receipt-proces
 # Redis via Upstash HTTP client
 redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
 
-# Track event IDs to avoid duplicates
-processed_events = set()
+# To avoid duplicate handling
+processed_event_ids = set()
 
 @app.route("/")
 def health():
@@ -32,76 +32,74 @@ def slack_events():
     if data.get("type") == "url_verification":
         return make_response(data["challenge"], 200, {"Content-Type": "text/plain"})
 
-    event_id = data.get("event_id")
-    if event_id in processed_events:
-        return make_response("Duplicate", 200)
-    processed_events.add(event_id)
-
     event = data.get("event", {})
+    event_id = data.get("event_id")
     user_id = event.get("user")
     event_type = event.get("type")
+    subtype = event.get("subtype")
 
-    if not user_id or event.get("bot_id"):
-        return make_response("Ignored bot/system event", 200)
+    # Avoid duplicates
+    if event_id in processed_event_ids:
+        return make_response("Duplicate", 200)
+    processed_event_ids.add(event_id)
 
-    api_key = redis.get(f"key:{user_id}")
-    if not api_key:
-        warn_key = f"warned:{user_id}:{event.get('ts')}"
-        if not redis.get(warn_key):
-            redis.set(warn_key, "1", ex=3600)
-            post_to_slack(
-                event.get("channel"),
-                event.get("ts"),
-                ":warning: You haven’t set your Tiliter API key yet.\n\nVisit https://ai.vision.tiliter.com to create an account and purchase credits.\nThen use `/set-apikey YOUR_KEY` to activate the bot."
-            )
-        return make_response("No API key", 200)
+    # Only handle file_shared image messages (ignores text, bots, etc.)
+    if event_type == "message" and subtype == "file_share":
+        if "bot_id" in event:
+            return make_response("Ignore bot", 200)
 
-    if isinstance(api_key, bytes):
-        api_key = api_key.decode()
+        api_key = redis.get(f"key:{user_id}")
+        if api_key is None:
+            warn_key = f"warned:{user_id}:{event.get('ts')}"
+            if not redis.get(warn_key):
+                redis.set(warn_key, "1", ex=3600)
+                post_to_slack(
+                    event.get("channel"),
+                    event.get("ts"),
+                    ":warning: You haven’t set your Tiliter API key yet.\n\nVisit https://ai.vision.tiliter.com to purchase credits, then use `/set-apikey YOUR_KEY` to activate."
+                )
+            return make_response("No API key", 200)
 
-    if data.get("type") == "event_callback":
-        if event_type == "message" and 'files' in event:
-            for file in event['files']:
-                if file.get('mimetype', '').startswith('image/'):
-                    image_url = file['url_private']
-                    channel = event['channel']
-                    thread_ts = event['ts']
-                    result = handle_image(image_url, api_key)
-                    post_to_slack(channel, thread_ts, result)
+        if isinstance(api_key, bytes):
+            api_key = api_key.decode()
+
+        for file in event.get("files", []):
+            if file.get("mimetype", "").startswith("image/"):
+                image_url = file["url_private"]
+                result = handle_image(image_url, api_key)
+                post_to_slack(event["channel"], event["ts"], result)
 
     return make_response("OK", 200)
 
 @app.route("/set-apikey", methods=["POST"])
-def set_apikey():
-    form = request.form
-    user_id = form.get("user_id")
-    text = form.get("text", "").strip()
+def set_api_key():
+    payload = request.form
+    user_id = payload.get("user_id")
+    text = payload.get("text", "").strip()
+
     if not text:
-        return make_response("❌ Please provide an API key like `/set-apikey YOUR_KEY`", 200)
+        return make_response("Usage: /set-apikey YOUR_KEY", 200)
+
     redis.set(f"key:{user_id}", text)
-    return make_response("✅ Tiliter API key set successfully.", 200)
+    return make_response("✅ Tiliter API key saved successfully.", 200)
 
 @app.route("/get-apikey", methods=["POST"])
-def get_apikey():
-    form = request.form
-    user_id = form.get("user_id")
+def get_api_key():
+    user_id = request.form.get("user_id")
     api_key = redis.get(f"key:{user_id}")
     if api_key:
-        return make_response(f"🔑 Your current API key is: `{api_key}`", 200)
-    else:
-        return make_response("❌ No API key found. Use `/set-apikey YOUR_KEY` to add one.", 200)
+        return make_response(f"🔐 Your current API key is:\n```{api_key}```", 200)
+    return make_response("❌ No API key set.", 200)
 
 @app.route("/delete-apikey", methods=["POST"])
-def delete_apikey():
-    form = request.form
-    user_id = form.get("user_id")
+def delete_api_key():
+    user_id = request.form.get("user_id")
     redis.delete(f"key:{user_id}")
-    return make_response("🗑️ Your Tiliter API key has been removed.", 200)
+    return make_response("🗑️ Tiliter API key removed.", 200)
 
 def handle_image(image_url, api_key):
     print("⬇️ Downloading image from Slack...")
     image_response = requests.get(image_url, headers={'Authorization': f'Bearer {SLACK_TOKEN}'})
-
     if image_response.status_code != 200:
         return f":x: Failed to download image. Status: {image_response.status_code}"
 
@@ -113,10 +111,7 @@ def handle_image(image_url, api_key):
     print("📤 Sending to Tiliter API...")
     response = requests.post(
         TILITER_URL,
-        headers={
-            'X-API-Key': api_key,
-            'Content-Type': 'application/json'
-        },
+        headers={'X-API-Key': api_key, 'Content-Type': 'application/json'},
         json=payload
     )
 
@@ -135,7 +130,10 @@ def handle_image(image_url, api_key):
         currency = result.get("currency", "")
 
         items = result.get("items", [])
-        item_lines = "\n".join([f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}" for item in items]) or "_No items found_"
+        if not items:
+            item_lines = "_No items detected._"
+        else:
+            item_lines = "\n".join([f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}" for item in items])
 
         return (
             f":receipt: *Receipt Details:*\n"
@@ -145,7 +143,6 @@ def handle_image(image_url, api_key):
             f"- Address: {address}\n\n"
             f":shopping_trolley: *Items:*\n{item_lines}"
         )
-
     except Exception as e:
         return f":x: Could not parse Tiliter response:\n{str(e)}"
 
