@@ -98,11 +98,19 @@ def handle_image(image_url):
             lines.append(f"- Address: {address}")
 
         if items:
-            lines.append(f"\n*🛒 Items:*")
+            details += "\n🛒 *Items:*"
             for item in items:
-                desc = item.get("description", "Unnamed")
-                price = item.get("price", "€0.00")
-                lines.append(f"• {desc} — {price}")
+                desc = (
+                    item.get("description")
+                    or item.get("name")
+                    or item.get("label")
+                    or item.get("text")
+                    or "Unnamed"
+                )
+                price = item.get("price", "N/A")
+                details += f"\n• {desc} — {price}€"
+        else:
+            details += "\n:no_entry_sign: No items found."
 
         return "\n".join(lines)
 
