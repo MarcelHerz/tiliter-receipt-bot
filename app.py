@@ -9,14 +9,13 @@ app = Flask(__name__)
 # === CONFIGURATION ===
 SLACK_TOKEN = os.environ.get("SLACK_TOKEN")
 TILITER_API_KEY = os.environ.get("TILITER_API_KEY")
-TILITER_URL = 'https://api.ai.vision.tiliter.com/api/v1/inference/object-counter'
+TILITER_URL = 'https://api.ai.vision.tiliter.com/api/v1/inference/receipt-processor'
 
-# In-memory tracking of processed events
 processed_events = set()
 
 @app.route("/")
 def health():
-    return "Slack bot is running.", 200
+    return "Receipt bot is running.", 200
 
 @app.route("/events", methods=["POST"])
 def slack_events():
@@ -24,18 +23,15 @@ def slack_events():
     print("📩 Incoming Slack event:")
     print(json.dumps(data, indent=2))
 
-    # Handle Slack URL verification
     if data.get("type") == "url_verification":
         return make_response(data["challenge"], 200, {"Content-Type": "text/plain"})
 
-    # Ignore duplicate events
     event_id = data.get("event_id")
     if event_id in processed_events:
         print("⏩ Duplicate event ignored.")
         return make_response("Duplicate", 200)
     processed_events.add(event_id)
 
-    # Process file messages
     if data.get("type") == "event_callback":
         event = data.get("event", {})
         if event.get("type") == "message" and 'files' in event:
@@ -44,22 +40,16 @@ def slack_events():
                     image_url = file['url_private']
                     channel = event['channel']
                     thread_ts = event['ts']
-            
-                    user_text = event.get("text", "").strip().lower()
-                    object_name = None
-            
-                    if user_text.startswith("count"):
-                        object_name = user_text.replace("count", "").strip()
-            
-                    result = handle_image(image_url, object_name)
+
+                    result = handle_receipt(image_url)
                     post_to_slack(channel, thread_ts, result)
 
         return make_response("OK", 200)
 
     return make_response("Ignored", 200)
 
-def handle_image(image_url, object_name=None):
-    print("⬇️ Downloading image from Slack...")
+def handle_receipt(image_url):
+    print("⬇️ Downloading receipt image from Slack...")
     image_response = requests.get(
         image_url,
         headers={'Authorization': f'Bearer {SLACK_TOKEN}'}
@@ -69,19 +59,9 @@ def handle_image(image_url, object_name=None):
         return f":x: Failed to download image. Status: {image_response.status_code}"
 
     image_b64 = base64.b64encode(image_response.content).decode('utf-8')
-    image_data_with_prefix = f"data:image/jpeg;base64,{image_b64}"
-
     payload = {
-        "image_data": image_data_with_prefix,
-        "parameter": f"count {object_name}" if object_name else "count all"
+        "image_data": f"data:image/jpeg;base64,{image_b64}"
     }
-
-
-    if object_name:
-        object_list = [o.strip() for o in object_name.split(",") if o.strip()]
-        payload["objects_specified"] = object_list
-        payload["disable_default_object_detection"] = True
-        print(f"🔍 Parsed object list: {object_list}")
 
     print("📤 Sending to Tiliter API...")
     response = requests.post(
@@ -98,27 +78,21 @@ def handle_image(image_url, object_name=None):
 
     try:
         result = response.json().get("result", {})
-        counts = result.get("object_counts", {})
-        total = result.get("total_objects", 0)
+        merchant = result.get("merchant", "Unknown")
+        total = result.get("total", "N/A")
+        date = result.get("date", "N/A")
 
-        if not counts:
-            return f":x: No objects found for '{object_name}'." if object_name else ":x: No objects found."
-
-        title = f"✅ *Tiliter Result*\n- *Total objects detected:* {total}"
-        if object_name:
-            title += f"\n- *Looking for:* `{object_name}`"
-
-        details = "\n".join([f"🔹 `{obj}` — `{count}`" for obj, count in counts.items()])
-
-        return f"{title}\n\n*Breakdown:*\n{details}"
-
-
-
+        return (
+            f"🧾 *Receipt Details:*\n"
+            f"- Merchant: *{merchant}*\n"
+            f"- Date: *{date}*\n"
+            f"- Total: *{total}*"
+        )
     except Exception as e:
         return f":x: Could not parse Tiliter response:\n{str(e)}"
 
 def post_to_slack(channel, thread_ts, message):
-    print("💬 Posting result back to Slack...")
+    print("💬 Posting receipt result back to Slack...")
     requests.post(
         'https://slack.com/api/chat.postMessage',
         headers={
