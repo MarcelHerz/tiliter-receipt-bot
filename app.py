@@ -29,18 +29,20 @@ def slack_events():
     if data.get("type") == "url_verification":
         return make_response(data["challenge"], 200, {"Content-Type": "text/plain"})
 
-    event_id = data.get("event_id")
     event = data.get("event", {})
+    event_id = data.get("event_id")
     user_id = event.get("user")
 
     if not user_id:
         return make_response("No user ID", 200)
 
+    # Check for registered API key
     api_key = redis.get(f"key:{user_id}")
     if api_key is None:
-        return make_response(":warning: No API key set for this user.", 200)
+        return make_response("⚠️ You need to set your API key first using `/setapikey`.", 200)
     api_key = api_key.decode()
 
+    # Only handle image uploads
     if data.get("type") == "event_callback":
         if event.get("type") == "message" and 'files' in event:
             for file in event['files']:
@@ -52,6 +54,18 @@ def slack_events():
                     post_to_slack(channel, thread_ts, result)
 
     return make_response("OK", 200)
+
+@app.route("/setapikey", methods=["POST"])
+def set_api_key():
+    form_data = request.form
+    user_id = form_data.get("user_id")
+    text = form_data.get("text", "").strip()
+
+    if not user_id or not text:
+        return make_response("❌ Please provide your Tiliter API key.", 200)
+
+    redis.set(f"key:{user_id}", text)
+    return make_response("✅ Your Tiliter API key has been saved securely.", 200)
 
 def handle_image(image_url, api_key):
     print("⬇️ Downloading image from Slack...")
