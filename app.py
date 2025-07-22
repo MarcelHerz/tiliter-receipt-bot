@@ -32,77 +32,72 @@ def slack_events():
     event = data.get("event", {})
     user_id = event.get("user")
     event_type = event.get("type")
+    ts = event.get("ts")
+    channel = event.get("channel")
 
     if not user_id:
         return make_response("No user ID", 200)
 
     api_key = redis.get(f"key:{user_id}")
+
     if api_key is None:
-        # Avoid loop: ignore if message comes from a bot
         if "bot_id" in event:
             return make_response("Ignore bot message", 200)
 
-        # Deduplicate warnings: 1 per user per hour
-        warn_key = f"warned:{user_id}"
+        warn_key = f"warned:{user_id}:{ts}"
         if not redis.get(warn_key):
             redis.set(warn_key, "1", ex=3600)
             post_to_slack(
-                event.get("channel"),
-                event.get("ts"),
-                ":warning: You haven’t set your Tiliter API key yet.\n\nPlease use `/set-apikey YOUR_KEY` to set it."
+                channel,
+                ts,
+                ":warning: You haven’t set your Tiliter API key yet.\n\nPlease visit https://ai.vision.tiliter.com and use `/set-apikey YOUR_KEY` to set it."
             )
         return make_response("No API key", 200)
 
-    # Already decoded by Upstash client
+    api_key = api_key.decode()
+
     if data.get("type") == "event_callback":
         if event_type == "message" and 'files' in event:
             if "bot_id" in event:
                 return make_response("Ignore own image post", 200)
 
+            dedup_key = f"processed:{user_id}:{ts}"
+            if redis.get(dedup_key):
+                print("⏩ Already processed this event.")
+                return make_response("Already processed", 200)
+
+            redis.set(dedup_key, "1", ex=3600)
+
             for file in event['files']:
                 if file.get('mimetype', '').startswith('image/'):
                     image_url = file['url_private']
-                    channel = event['channel']
-                    thread_ts = event['ts']
                     result = handle_image(image_url, api_key)
-                    post_to_slack(channel, thread_ts, result)
+                    post_to_slack(channel, ts, result)
 
     return make_response("OK", 200)
 
 @app.route("/set-apikey", methods=["POST"])
-def set_api_key():
-    user_id = request.form.get("user_id")
-    text = request.form.get("text", "").strip()
+def set_apikey():
+    data = request.form
+    user_id = data.get("user_id")
+    text = data.get("text")
 
     if not user_id or not text:
-        return make_response("❌ Please provide your API key like this:\n/set-apikey YOUR_KEY", 200)
+        return make_response("Missing user_id or API key", 400)
 
     redis.set(f"key:{user_id}", text)
-    return make_response("✅ Your Tiliter API key has been registered successfully.", 200)
+    return make_response("✅ API key saved successfully.", 200)
 
 @app.route("/delete-apikey", methods=["POST"])
-def delete_api_key():
-    user_id = request.form.get("user_id")
+def delete_apikey():
+    data = request.form
+    user_id = data.get("user_id")
 
     if not user_id:
-        return make_response("❌ Could not identify your user ID.", 200)
+        return make_response("Missing user_id", 400)
 
     redis.delete(f"key:{user_id}")
-    redis.delete(f"warned:{user_id}")
     return make_response("🗑️ Your Tiliter API key has been deleted.", 200)
-
-@app.route("/get-apikey", methods=["POST"])
-def get_api_key():
-    user_id = request.form.get("user_id")
-
-    if not user_id:
-        return make_response("❌ Could not identify your user ID.", 200)
-
-    api_key = redis.get(f"key:{user_id}")
-    if not api_key:
-        return make_response("ℹ️ No API key found for your user.", 200)
-
-    return make_response(f"🔐 Your current API key is:\n```{api_key}```", 200)
 
 def handle_image(image_url, api_key):
     print("⬇️ Downloading image from Slack...")
@@ -141,7 +136,10 @@ def handle_image(image_url, api_key):
         currency = result.get("currency", "")
 
         items = result.get("items", [])
-        item_lines = "\n".join([f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}" for item in items])
+        item_lines = "\n".join([
+            f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}"
+            for item in items
+        ]) or ":x: No items found."
 
         return (
             f"🧾 *Receipt Details:*\n"
