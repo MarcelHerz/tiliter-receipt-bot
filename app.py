@@ -25,11 +25,11 @@ def health():
 def slack_events():
     data = request.json
 
-    # Always acknowledge first to avoid Slack retries
+    # Immediately acknowledge to prevent Slack retries
     response = make_response("OK", 200)
     response.headers["Content-Type"] = "text/plain"
 
-    # Process in a background thread
+    # Process event in background
     threading.Thread(target=handle_slack_event, args=(data,)).start()
     return response
 
@@ -38,7 +38,7 @@ def handle_slack_event(data):
     print(json.dumps(data, indent=2))
 
     if data.get("type") == "url_verification":
-        return  # already handled earlier
+        return
 
     event = data.get("event", {})
     user_id = event.get("user")
@@ -49,12 +49,17 @@ def handle_slack_event(data):
     if not user_id or not channel or not event_ts:
         return
 
+    # ✅ Deduplicate to avoid loops
+    dedup_key = f"processed:{channel}:{event_ts}"
+    if redis.get(dedup_key):
+        print(f"⏭ Skipping duplicate event {dedup_key}")
+        return
+    redis.set(dedup_key, "1", ex=300)
+
+    # 🔑 Retrieve user-specific API key
     api_key = redis.get(f"key:{user_id}")
     if api_key is None:
-        # Generate a deduplication key even if event_id is missing
-        event_id = data.get("event_id") or f"{channel}_{event_ts}"
-        warn_key = f"warned:{event_id}"
-
+        warn_key = f"warned:{user_id}:{event_ts}"
         if not redis.get(warn_key):
             redis.set(warn_key, "1", ex=3600)
             post_to_slack(
@@ -66,6 +71,7 @@ def handle_slack_event(data):
 
     api_key = api_key.decode()
 
+    # 🖼 Process image files in messages
     if data.get("type") == "event_callback":
         if event_type == "message" and 'files' in event:
             for file in event['files']:
@@ -111,7 +117,10 @@ def handle_image(image_url, api_key):
         currency = result.get("currency", "")
 
         items = result.get("items", [])
-        item_lines = "\n".join([f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}" for item in items])
+        item_lines = "\n".join([
+            f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}"
+            for item in items
+        ])
 
         return (
             f"🧾 *Receipt Details:*\n"
