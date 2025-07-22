@@ -25,11 +25,11 @@ def health():
 def slack_events():
     data = request.json
 
-    # Immediately acknowledge to prevent Slack retries
+    # Immediately acknowledge to avoid Slack retries
     response = make_response("OK", 200)
     response.headers["Content-Type"] = "text/plain"
 
-    # Process event in background
+    # Process in a background thread
     threading.Thread(target=handle_slack_event, args=(data,)).start()
     return response
 
@@ -37,29 +37,36 @@ def handle_slack_event(data):
     print("📩 Incoming Slack event:")
     print(json.dumps(data, indent=2))
 
-    if data.get("type") == "url_verification":
+    if data.get("type") != "event_callback":
         return
 
     event = data.get("event", {})
-    user_id = event.get("user")
     event_type = event.get("type")
-    event_ts = event.get("ts")
+    subtype = event.get("subtype")
+
+    # Ignore bot messages and irrelevant subtypes
+    if "bot_id" in event or subtype in ["bot_message", "message_changed", "message_deleted", "file_share"]:
+        print("🔕 Ignoring bot or system message")
+        return
+
+    user_id = event.get("user")
     channel = event.get("channel")
+    event_ts = event.get("ts")
 
     if not user_id or not channel or not event_ts:
         return
 
-    # ✅ Deduplicate to avoid loops
+    # Prevent duplicate responses for the same message
     dedup_key = f"processed:{channel}:{event_ts}"
     if redis.get(dedup_key):
-        print(f"⏭ Skipping duplicate event {dedup_key}")
+        print(f"⏭ Already processed event {dedup_key}")
         return
     redis.set(dedup_key, "1", ex=300)
 
-    # 🔑 Retrieve user-specific API key
+    # Get user API key
     api_key = redis.get(f"key:{user_id}")
     if api_key is None:
-        warn_key = f"warned:{user_id}:{event_ts}"
+        warn_key = f"warned:{user_id}:{channel}"
         if not redis.get(warn_key):
             redis.set(warn_key, "1", ex=3600)
             post_to_slack(
@@ -71,14 +78,13 @@ def handle_slack_event(data):
 
     api_key = api_key.decode()
 
-    # 🖼 Process image files in messages
-    if data.get("type") == "event_callback":
-        if event_type == "message" and 'files' in event:
-            for file in event['files']:
-                if file.get('mimetype', '').startswith('image/'):
-                    image_url = file['url_private']
-                    result = handle_image(image_url, api_key)
-                    post_to_slack(channel, event_ts, result)
+    # Process messages that contain image files
+    if event_type == "message" and 'files' in event:
+        for file in event['files']:
+            if file.get('mimetype', '').startswith('image/'):
+                image_url = file['url_private']
+                result = handle_image(image_url, api_key)
+                post_to_slack(channel, event_ts, result)
 
 def handle_image(image_url, api_key):
     print("⬇️ Downloading image from Slack...")
