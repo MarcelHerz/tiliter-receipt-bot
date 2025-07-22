@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: tiliter-slack-bot
+    name: tiliter-receipt-bot
     env: python
     buildCommand: ""
     startCommand: python app.py
