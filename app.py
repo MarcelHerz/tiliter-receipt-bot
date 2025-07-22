@@ -39,8 +39,8 @@ def slack_events():
     api_key = redis.get(f"key:{user_id}")
 
     if api_key is None:
-        # Avoid infinite loop by skipping bot messages
-        if event.get("subtype") == "bot_message":
+        # Avoid loop: ignore if message comes from a bot
+        if "bot_id" in event:
             return make_response("Ignore bot message", 200)
 
         # Use a composite key to avoid double-posting in same thread
@@ -58,6 +58,10 @@ def slack_events():
 
     if data.get("type") == "event_callback":
         if event_type == "message" and 'files' in event:
+            # Skip bot's own image messages
+            if "bot_id" in event:
+                return make_response("Ignore own image post", 200)
+
             for file in event['files']:
                 if file.get('mimetype', '').startswith('image/'):
                     image_url = file['url_private']
