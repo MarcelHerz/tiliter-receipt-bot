@@ -2,22 +2,19 @@ import os
 import json
 import base64
 import requests
-import redis
 from flask import Flask, request, make_response
+from upstash_redis import Redis
 
 app = Flask(__name__)
 
 # === CONFIGURATION ===
 SLACK_TOKEN = os.environ.get("SLACK_TOKEN")
-REDIS_URL = os.environ.get("REDIS_URL")
-TILITER_AGENT = "receipt-processor"
-TILITER_URL = f'https://api.ai.vision.tiliter.com/api/v1/inference/{TILITER_AGENT}'
+REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
+REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+TILITER_URL = "https://api.ai.vision.tiliter.com/api/v1/inference/receipt-processor"
 
-# Redis client setup
-r = redis.from_url(REDIS_URL)
-
-# In-memory tracking of processed events
-processed_events = set()
+# Redis via Upstash HTTP client
+redis = Redis(url=REDIS_URL, token=REDIS_TOKEN)
 
 @app.route("/")
 def health():
@@ -33,53 +30,32 @@ def slack_events():
         return make_response(data["challenge"], 200, {"Content-Type": "text/plain"})
 
     event_id = data.get("event_id")
-    if event_id in processed_events:
-        print("⏩ Duplicate event ignored.")
-        return make_response("Duplicate", 200)
-    processed_events.add(event_id)
+    event = data.get("event", {})
+    user_id = event.get("user")
+
+    if not user_id:
+        return make_response("No user ID", 200)
+
+    api_key = redis.get(f"key:{user_id}")
+    if api_key is None:
+        return make_response(":warning: No API key set for this user.", 200)
+    api_key = api_key.decode()
 
     if data.get("type") == "event_callback":
-        event = data.get("event", {})
-        user_id = event.get("user")
-
-        # Handle API key setup command
-        if event.get("type") == "message" and not 'files' in event:
-            text = event.get("text", "").strip().lower()
-            if text.startswith("/setapikey") or text.startswith("my key is"):
-                token = text.replace("/setapikey", "").replace("my key is", "").strip()
-                if token:
-                    r.set(f"key:{user_id}", token)
-                    post_to_slack(event["channel"], event["ts"], "✅ Your API key has been saved.")
-                    return make_response("OK", 200)
-                else:
-                    post_to_slack(event["channel"], event["ts"], "❌ No API key detected. Please try again.")
-                    return make_response("OK", 200)
-
         if event.get("type") == "message" and 'files' in event:
             for file in event['files']:
                 if file.get('mimetype', '').startswith('image/'):
                     image_url = file['url_private']
                     channel = event['channel']
                     thread_ts = event['ts']
-
-                    api_key = r.get(f"key:{user_id}")
-                    if not api_key:
-                        post_to_slack(channel, thread_ts, "❌ You haven't set your API key yet. Please send `/setapikey YOUR_KEY`")
-                        return make_response("OK", 200)
-
-                    result = handle_image(image_url, api_key.decode())
+                    result = handle_image(image_url, api_key)
                     post_to_slack(channel, thread_ts, result)
 
-        return make_response("OK", 200)
-
-    return make_response("Ignored", 200)
+    return make_response("OK", 200)
 
 def handle_image(image_url, api_key):
     print("⬇️ Downloading image from Slack...")
-    image_response = requests.get(
-        image_url,
-        headers={'Authorization': f'Bearer {SLACK_TOKEN}'}
-    )
+    image_response = requests.get(image_url, headers={'Authorization': f'Bearer {SLACK_TOKEN}'})
 
     if image_response.status_code != 200:
         return f":x: Failed to download image. Status: {image_response.status_code}"
@@ -107,25 +83,20 @@ def handle_image(image_url, api_key):
         merchant = result.get("merchant", "Unknown")
         total = result.get("total", "N/A")
         date = result.get("date", "N/A")
-        address = result.get("address", "N/A")
+        address = result.get("address", "")
+        currency = result.get("currency", "")
+
         items = result.get("items", [])
+        item_lines = "\n".join([f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}" for item in items])
 
-        message = (
-            f"🧾 *Receipt Details:*"
-            f"• *Merchant:* {merchant}"
-            f"• *Date:* {date}"
-            f"• *Total:* {total} €"
-            f"• *Address:* {address}"
+        return (
+            f"🧾 *Receipt Details:*\n"
+            f"- Merchant: *{merchant}*\n"
+            f"- Date: *{date}*\n"
+            f"- Total: *{total}{currency}*\n"
+            f"- Address: {address}\n\n"
+            f"🛒 *Items:*\n{item_lines}"
         )
-
-        if items:
-            message += ":shopping_trolley: *Items:*"
-            for item in items:
-                name = item.get("name", "Unnamed")
-                price = item.get("price", "?")
-                message += f"• {name} — {price} €"
-
-        return message
 
     except Exception as e:
         return f":x: Could not parse Tiliter response:\n{str(e)}"
