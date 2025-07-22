@@ -37,14 +37,13 @@ def slack_events():
         return make_response("No user ID", 200)
 
     api_key = redis.get(f"key:{user_id}")
-
     if api_key is None:
-        # Avoid warning loops (e.g. from bot replies)
+        # Avoid loop: ignore if message comes from a bot
         if "bot_id" in event:
             return make_response("Ignore bot message", 200)
 
-        # Deduplicate warnings: 1 per user per hour
-        warn_key = f"warned:{user_id}"
+        # Use a composite key to avoid double-posting in same thread
+        warn_key = f"warned:{user_id}:{event.get('ts')}"
         if not redis.get(warn_key):
             redis.set(warn_key, "1", ex=3600)
             post_to_slack(
@@ -58,9 +57,9 @@ def slack_events():
 
     if data.get("type") == "event_callback":
         if event_type == "message" and 'files' in event:
-            # Skip bot's own posts
+            # Skip bot's own image messages
             if "bot_id" in event:
-                return make_response("Ignore own message", 200)
+                return make_response("Ignore own image post", 200)
 
             for file in event['files']:
                 if file.get('mimetype', '').startswith('image/'):
@@ -76,6 +75,8 @@ def slack_events():
 def set_api_key():
     user_id = request.form.get("user_id")
     text = request.form.get("text", "").strip()
+
+    print(f"Received API key from {user_id}: {text}")
 
     if not user_id or not text:
         return make_response("❌ Please provide your API key like this:\n/set-apikey YOUR_KEY", 200)
@@ -120,10 +121,7 @@ def handle_image(image_url, api_key):
         currency = result.get("currency", "")
 
         items = result.get("items", [])
-        item_lines = "\n".join([
-            f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}"
-            for item in items
-        ])
+        item_lines = "\n".join([f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}" for item in items])
 
         return (
             f"🧾 *Receipt Details:*\n"
