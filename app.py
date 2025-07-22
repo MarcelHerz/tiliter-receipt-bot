@@ -29,27 +29,29 @@ def slack_events():
     if data.get("type") == "url_verification":
         return make_response(data["challenge"], 200, {"Content-Type": "text/plain"})
 
-    event_id = data.get("event_id")
     event = data.get("event", {})
     user_id = event.get("user")
+    event_type = event.get("type")
 
     if not user_id:
         return make_response("No user ID", 200)
 
     api_key = redis.get(f"key:{user_id}")
     if api_key is None:
-    if event.get("type") == "file_shared":
-        post_to_slack(
-            event.get("channel"),
-            event.get("ts"),
-            ":warning: You haven’t set your Tiliter API key yet.\n\nPlease use `/register-key YOUR_KEY` to set it."
+        # Only post the warning once per event ID
+        if data.get("event_id") and not redis.get(f"warned:{data['event_id']}"):
+            redis.set(f"warned:{data['event_id']}", "1", ex=3600)  # TTL 1 hour
+            post_to_slack(
+                event.get("channel"),
+                event.get("ts"),
+                ":warning: You haven’t set your Tiliter API key yet.\n\nPlease use `/register-key YOUR_KEY` to set it."
             )
         return make_response("No API key", 200)
 
     api_key = api_key.decode()
 
     if data.get("type") == "event_callback":
-        if event.get("type") == "message" and 'files' in event:
+        if event_type == "message" and 'files' in event:
             for file in event['files']:
                 if file.get('mimetype', '').startswith('image/'):
                     image_url = file['url_private']
