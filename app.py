@@ -111,26 +111,19 @@ def handle_image(image_url, api_key):
         items = result.get("items", [])
 
         message = (
-            f"🧾 *Receipt Details:*
-"
-            f"• *Merchant:* {merchant}
-"
-            f"• *Date:* {date}
-"
-            f"• *Total:* {total} €
-"
-            f"• *Address:* {address}
-"
+            f"🧾 *Receipt Details:*"
+            f"• *Merchant:* {merchant}"
+            f"• *Date:* {date}"
+            f"• *Total:* {total} €"
+            f"• *Address:* {address}"
         )
 
         if items:
-            message += ":shopping_trolley: *Items:*
-"
+            message += ":shopping_trolley: *Items:*"
             for item in items:
                 name = item.get("name", "Unnamed")
                 price = item.get("price", "?")
-                message += f"• {name} — {price} €
-"
+                message += f"• {name} — {price} €"
 
         return message
 
