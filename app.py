@@ -29,24 +29,18 @@ def slack_events():
     response = make_response("OK", 200)
     response.headers["Content-Type"] = "text/plain"
 
-    # Process in a background thread
+    # Handle the event in a background thread
     threading.Thread(target=handle_slack_event, args=(data,)).start()
     return response
 
 def handle_slack_event(data):
-    print("📩 Incoming Slack event:")
-    print(json.dumps(data, indent=2))
-
-    if data.get("type") != "event_callback":
-        return
-
     event = data.get("event", {})
     event_type = event.get("type")
     subtype = event.get("subtype")
 
-    # Ignore bot messages and irrelevant subtypes
-    if "bot_id" in event or subtype in ["bot_message", "message_changed", "message_deleted", "file_share"]:
-        print("🔕 Ignoring bot or system message")
+    # 🧼 Ignore bot messages and system updates
+    if "bot_id" in event or subtype in ["bot_message", "message_changed", "message_deleted"]:
+        print("🔕 Ignoring bot/system message")
         return
 
     user_id = event.get("user")
@@ -56,19 +50,24 @@ def handle_slack_event(data):
     if not user_id or not channel or not event_ts:
         return
 
-    # Prevent duplicate responses for the same message
-    dedup_key = f"processed:{channel}:{event_ts}"
+    # 🧠 Smart deduplication: prefer client_msg_id or file.id
+    dedup_key = (
+        event.get("client_msg_id") or
+        (event.get("files")[0].get("id") if event.get("files") else None) or
+        f"{channel}:{event_ts}"
+    )
+    dedup_key = f"processed:{dedup_key}"
     if redis.get(dedup_key):
-        print(f"⏭ Already processed event {dedup_key}")
+        print(f"⏭ Skipping duplicate event: {dedup_key}")
         return
     redis.set(dedup_key, "1", ex=300)
 
-    # Get user API key
+    # 🔑 Check if user has registered an API key
     api_key = redis.get(f"key:{user_id}")
     if api_key is None:
-        warn_key = f"warned:{user_id}:{channel}"
+        warn_key = f"warned:{user_id}"
         if not redis.get(warn_key):
-            redis.set(warn_key, "1", ex=3600)
+            redis.set(warn_key, "1", ex=3600)  # One warning per hour
             post_to_slack(
                 channel,
                 event_ts,
@@ -78,7 +77,7 @@ def handle_slack_event(data):
 
     api_key = api_key.decode()
 
-    # Process messages that contain image files
+    # 🖼️ Process messages that contain image files (includes subtype=file_share)
     if event_type == "message" and 'files' in event:
         for file in event['files']:
             if file.get('mimetype', '').startswith('image/'):
