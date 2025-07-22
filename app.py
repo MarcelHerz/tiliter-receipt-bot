@@ -36,36 +36,37 @@ def slack_events():
     if not user_id:
         return make_response("No user ID", 200)
 
+    # Ignore non-message events (e.g. file_shared)
+    if event_type != "message":
+        return make_response("Skipping non-message event", 200)
+
+    # Ignore bot's own messages
+    if "bot_id" in event:
+        return make_response("Ignore bot message", 200)
+
     api_key = redis.get(f"key:{user_id}")
     if api_key is None:
-        # Avoid loop: ignore if message comes from a bot
-        if "bot_id" in event:
-            return make_response("Ignore bot message", 200)
-
-        # Deduplicate warnings: 1 per user per hour
         warn_key = f"warned:{user_id}"
         if not redis.get(warn_key):
             redis.set(warn_key, "1", ex=3600)
             post_to_slack(
                 event.get("channel"),
                 event.get("ts"),
-                ":warning: You haven’t set your Tiliter API key yet.\n\nPlease use `/set-apikey YOUR_KEY` to set it."
+                ":warning: You haven’t set your Tiliter API key yet.\n\n"
+                "Please visit https://ai.vision.tiliter.com to purchase credits and copy your API key. Then run:\n"
+                "`/set-apikey YOUR_KEY`"
             )
         return make_response("No API key", 200)
 
-    # Already decoded by Upstash client
-    if data.get("type") == "event_callback":
-        if event_type == "message" and 'files' in event:
-            if "bot_id" in event:
-                return make_response("Ignore own image post", 200)
-
-            for file in event['files']:
-                if file.get('mimetype', '').startswith('image/'):
-                    image_url = file['url_private']
-                    channel = event['channel']
-                    thread_ts = event['ts']
-                    result = handle_image(image_url, api_key)
-                    post_to_slack(channel, thread_ts, result)
+    # Already decoded string
+    if 'files' in event:
+        for file in event['files']:
+            if file.get('mimetype', '').startswith('image/'):
+                image_url = file['url_private']
+                channel = event['channel']
+                thread_ts = event['ts']
+                result = handle_image(image_url, api_key)
+                post_to_slack(channel, thread_ts, result)
 
     return make_response("OK", 200)
 
@@ -141,14 +142,17 @@ def handle_image(image_url, api_key):
         currency = result.get("currency", "")
 
         items = result.get("items", [])
-        item_lines = "\n".join([f"• {item.get('name', 'Unnamed')} — {item.get('price', 'N/A')}{currency}" for item in items])
+        item_lines = "\n".join([
+            f"• {item.get('name', 'Unnamed')} — {item.get('price') or 'N/A'}{currency or ''}"
+            for item in items
+        ]) if items else "_No items detected._"
 
         return (
             f"🧾 *Receipt Details:*\n"
-            f"- Merchant: *{merchant}*\n"
-            f"- Date: *{date}*\n"
-            f"- Total: *{total}{currency}*\n"
-            f"- Address: {address}\n\n"
+            f"- Merchant: *{merchant or 'Unknown'}*\n"
+            f"- Date: *{date or 'N/A'}*\n"
+            f"- Total: *{total or 'N/A'} {currency or ''}*\n"
+            f"- Address: {address or 'N/A'}\n\n"
             f"🛒 *Items:*\n{item_lines}"
         )
 
