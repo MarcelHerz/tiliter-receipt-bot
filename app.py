@@ -33,6 +33,17 @@ def slack_events():
     threading.Thread(target=handle_slack_event, args=(data,)).start()
     return response
 
+@app.route("/register-key", methods=["POST"])
+def register_key():
+    user_id = request.form.get("user_id")
+    text = request.form.get("text", "").strip()
+
+    if not user_id or not text:
+        return make_response("❌ Please provide your API key like this:\n/register-key YOUR_KEY", 200)
+
+    redis.set(f"key:{user_id}", text)
+    return make_response("✅ Your Tiliter API key has been registered successfully.", 200)
+
 def handle_slack_event(data):
     event = data.get("event", {})
     event_type = event.get("type")
