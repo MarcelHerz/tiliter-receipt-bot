@@ -29,20 +29,18 @@ def slack_events():
     if data.get("type") == "url_verification":
         return make_response(data["challenge"], 200, {"Content-Type": "text/plain"})
 
-    event = data.get("event", {})
     event_id = data.get("event_id")
+    event = data.get("event", {})
     user_id = event.get("user")
 
     if not user_id:
         return make_response("No user ID", 200)
 
-    # Check for registered API key
     api_key = redis.get(f"key:{user_id}")
     if api_key is None:
-        return make_response("⚠️ You need to set your API key first using `/setapikey`.", 200)
+        return make_response(":warning: No API key set for this user.", 200)
     api_key = api_key.decode()
 
-    # Only handle image uploads
     if data.get("type") == "event_callback":
         if event.get("type") == "message" and 'files' in event:
             for file in event['files']:
@@ -54,18 +52,6 @@ def slack_events():
                     post_to_slack(channel, thread_ts, result)
 
     return make_response("OK", 200)
-
-@app.route("/setapikey", methods=["POST"])
-def set_api_key():
-    form_data = request.form
-    user_id = form_data.get("user_id")
-    text = form_data.get("text", "").strip()
-
-    if not user_id or not text:
-        return make_response("❌ Please provide your Tiliter API key.", 200)
-
-    redis.set(f"key:{user_id}", text)
-    return make_response("✅ Your Tiliter API key has been saved securely.", 200)
 
 def handle_image(image_url, api_key):
     print("⬇️ Downloading image from Slack...")
@@ -94,6 +80,9 @@ def handle_image(image_url, api_key):
 
     try:
         result = response.json().get("result", {})
+        print("✅ Tiliter API response:")
+        print(json.dumps(result, indent=2))
+
         merchant = result.get("merchant", "Unknown")
         total = result.get("total", "N/A")
         date = result.get("date", "N/A")
@@ -117,7 +106,7 @@ def handle_image(image_url, api_key):
 
 def post_to_slack(channel, thread_ts, message):
     print("💬 Posting result back to Slack...")
-    requests.post(
+    res = requests.post(
         'https://slack.com/api/chat.postMessage',
         headers={
             'Authorization': f'Bearer {SLACK_TOKEN}',
@@ -129,6 +118,7 @@ def post_to_slack(channel, thread_ts, message):
             'text': message
         }
     )
+    print("🔁 Slack API response:", res.status_code, res.text)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
