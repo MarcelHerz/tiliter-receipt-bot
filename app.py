@@ -56,7 +56,7 @@ def slack_events():
                 post_to_slack(
                     event.get("channel"),
                     event.get("ts"),
-                    ":warning: You haven’t set your Tiliter API key yet.\n\nVisit https://ai.vision.tiliter.com to purchase credits, then use `/set-apikey YOUR_KEY` to activate."
+                    ":warning: You haven’t set your Tiliter API key yet.\n\nVisit https://ai.vision.tiliter.com to purchase credits, then use `/setapikey YOUR_KEY` to activate."
                 )
             return make_response("No API key", 200)
 
