@@ -25,11 +25,10 @@ def health():
 def slack_events():
     data = request.json
 
-    # Immediately acknowledge to avoid Slack retries
+    # Immediately respond to Slack to avoid retries
     response = make_response("OK", 200)
     response.headers["Content-Type"] = "text/plain"
 
-    # Handle the event in a background thread
     threading.Thread(target=handle_slack_event, args=(data,)).start()
     return response
 
@@ -38,9 +37,8 @@ def handle_slack_event(data):
     event_type = event.get("type")
     subtype = event.get("subtype")
 
-    # 🧼 Ignore bot messages and system updates
+    # Ignore bot messages and system events
     if "bot_id" in event or subtype in ["bot_message", "message_changed", "message_deleted"]:
-        print("🔕 Ignoring bot/system message")
         return
 
     user_id = event.get("user")
@@ -50,7 +48,7 @@ def handle_slack_event(data):
     if not user_id or not channel or not event_ts:
         return
 
-    # 🧠 Smart deduplication: prefer client_msg_id or file.id
+    # Deduplication logic
     dedup_key = (
         event.get("client_msg_id") or
         (event.get("files")[0].get("id") if event.get("files") else None) or
@@ -58,16 +56,15 @@ def handle_slack_event(data):
     )
     dedup_key = f"processed:{dedup_key}"
     if redis.get(dedup_key):
-        print(f"⏭ Skipping duplicate event: {dedup_key}")
         return
     redis.set(dedup_key, "1", ex=300)
 
-    # 🔑 Check if user has registered an API key
+    # Check API key
     api_key = redis.get(f"key:{user_id}")
     if api_key is None:
         warn_key = f"warned:{user_id}"
         if not redis.get(warn_key):
-            redis.set(warn_key, "1", ex=3600)  # One warning per hour
+            redis.set(warn_key, "1", ex=3600)  # Warn once per hour
             post_to_slack(
                 channel,
                 event_ts,
@@ -77,7 +74,7 @@ def handle_slack_event(data):
 
     api_key = api_key.decode()
 
-    # 🖼️ Process messages that contain image files (includes subtype=file_share)
+    # Process image files
     if event_type == "message" and 'files' in event:
         for file in event['files']:
             if file.get('mimetype', '').startswith('image/'):
