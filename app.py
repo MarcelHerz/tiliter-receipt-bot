@@ -8,11 +8,11 @@ app = Flask(__name__)
 
 # === CONFIGURATION ===
 SLACK_TOKEN = os.environ.get("SLACK_TOKEN")
-TILITER_API_KEY = os.environ.get("TILITER_API_KEY")
-TILITER_URL = 'https://api.ai.vision.tiliter.com/api/v1/inference/receipt-processor'
+DEFAULT_TILITER_API_KEY = os.environ.get("TILITER_API_KEY")
+TILITER_URL = 'https://api.ai.vision.tiliter.com/api/v1/inference/object-counter'
 
-# In-memory tracking of processed events
-processed_events = set()
+# In-memory storage (temporary until Redis is plugged in)
+user_api_keys = {}
 
 @app.route("/")
 def health():
@@ -24,54 +24,57 @@ def slack_events():
     print("📩 Incoming Slack event:")
     print(json.dumps(data, indent=2))
 
-    # Handle Slack URL verification
+    # Slack URL verification
     if data.get("type") == "url_verification":
         return make_response(data["challenge"], 200, {"Content-Type": "text/plain"})
 
-    # Ignore duplicate events
-    event_id = data.get("event_id")
-    if event_id in processed_events:
-        print("⏩ Duplicate event ignored.")
-        return make_response("Duplicate", 200)
-    processed_events.add(event_id)
-
-    # Process file messages
     if data.get("type") == "event_callback":
         event = data.get("event", {})
+        user_id = event.get("user")
+
+        # Handle "register" command
+        if event.get("type") == "message" and 'text' in event:
+            text = event["text"].strip().lower()
+            if text.startswith("register sk-"):
+                api_key = text.split("register", 1)[1].strip()
+                user_api_keys[user_id] = api_key
+                post_to_slack(event["channel"], event["ts"], ":white_check_mark: API key registered successfully.")
+                return make_response("Registered", 200)
+
+        # Process file uploads
         if event.get("type") == "message" and 'files' in event:
-            for file in event['files']:
-                if file.get('mimetype', '').startswith('image/'):
-                    image_url = file['url_private']
-                    channel = event['channel']
-                    thread_ts = event['ts']
+            image_url = next((f['url_private'] for f in event['files'] if f.get('mimetype', '').startswith('image/')), None)
+            if image_url:
+                api_key = user_api_keys.get(user_id)
+                if not api_key:
+                    post_to_slack(event["channel"], event["ts"], ":warning: Please register your API key first using `register sk-...`.")
+                    return make_response("No key", 200)
 
-                    result = handle_image(image_url)
-                    post_to_slack(channel, thread_ts, result)
+                user_text = event.get("text", "").lower()
+                object_name = user_text.replace("count", "").strip() if user_text.startswith("count") else None
+                result = handle_image(image_url, object_name, api_key)
+                post_to_slack(event["channel"], event["ts"], result)
 
-        return make_response("OK", 200)
+    return make_response("OK", 200)
 
-    return make_response("Ignored", 200)
-
-def handle_image(image_url):
+def handle_image(image_url, object_name, api_key):
     print("⬇️ Downloading image from Slack...")
-    image_response = requests.get(
-        image_url,
-        headers={'Authorization': f'Bearer {SLACK_TOKEN}'}
-    )
-
+    image_response = requests.get(image_url, headers={'Authorization': f'Bearer {SLACK_TOKEN}'})
     if image_response.status_code != 200:
         return f":x: Failed to download image. Status: {image_response.status_code}"
 
     image_b64 = base64.b64encode(image_response.content).decode('utf-8')
+    image_data_uri = f"data:image/jpeg;base64,{image_b64}"
     payload = {
-        "image_data": f"data:image/jpeg;base64,{image_b64}"
+        "image_data": image_data_uri,
+        "parameter": f"count {object_name}" if object_name else ""
     }
 
     print("📤 Sending to Tiliter API...")
     response = requests.post(
         TILITER_URL,
         headers={
-            'X-API-Key': TILITER_API_KEY,
+            'X-API-Key': api_key,
             'Content-Type': 'application/json'
         },
         json=payload
@@ -82,32 +85,18 @@ def handle_image(image_url):
 
     try:
         result = response.json().get("result", {})
-        merchant = result.get("merchant", "Unknown")
-        total = result.get("total", "N/A")
-        date = result.get("date", "N/A")
-        address = result.get("address", "N/A")
-        currency = result.get("currency", "€")
+        counts = result.get("object_counts", {})
+        total = result.get("total_objects", 0)
 
-        details = (
-            f"🧾 *Receipt Details:*\n"
-            f"- Merchant: *{merchant}*\n"
-            f"- Date: *{date}*\n"
-            f"- Total: *{total} {currency}*\n"
-            f"- Address: {address}"
+        if not counts:
+            return ":x: No objects found."
+
+        lines = "\n".join([f"• {obj}: {count}" for obj, count in counts.items()])
+        return (
+            f":brain: *Tiliter Result:*\n"
+            f":white_check_mark: Total objects found: {total}\n"
+            f":1234: Breakdown:\n{lines}"
         )
-
-        items = result.get("items", [])
-        if items:
-            details += "\n\n:shopping_trolley: *Items:*"
-            for item in items:
-                name = item.get("name", "Unnamed")
-                price = item.get("price", "N/A")
-                details += f"\n• {name} — {price} {currency}"
-        else:
-            details += "\n:no_entry_sign: No items found."
-
-        return details
-
     except Exception as e:
         return f":x: Could not parse Tiliter response:\n{str(e)}"
 
