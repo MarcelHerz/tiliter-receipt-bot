@@ -26,6 +26,15 @@ def slack_events():
     print("📩 Incoming Slack event:")
     print(json.dumps(data, indent=2))
 
+    # === Deduplicate using event_id ===
+    event_id = data.get("event_id")
+    if event_id:
+        seen_key = f"seen:{event_id}"
+        if redis.get(seen_key):
+            return make_response("Duplicate event", 200)
+        redis.set(seen_key, "1", ex=3600)
+
+    # === Handle URL verification ===
     if data.get("type") == "url_verification":
         return make_response(data["challenge"], 200, {"Content-Type": "text/plain"})
 
@@ -36,11 +45,10 @@ def slack_events():
     if not user_id:
         return make_response("No user ID", 200)
 
-    # Ignore non-message events (e.g. file_shared)
+    # Only handle user message events
     if event_type != "message":
         return make_response("Skipping non-message event", 200)
 
-    # Ignore bot's own messages
     if "bot_id" in event:
         return make_response("Ignore bot message", 200)
 
@@ -58,7 +66,6 @@ def slack_events():
             )
         return make_response("No API key", 200)
 
-    # Already decoded string
     if 'files' in event:
         for file in event['files']:
             if file.get('mimetype', '').startswith('image/'):
@@ -117,63 +124,4 @@ def handle_image(image_url, api_key):
         "image_data": f"data:image/jpeg;base64,{image_b64}"
     }
 
-    print("📤 Sending to Tiliter API...")
-    response = requests.post(
-        TILITER_URL,
-        headers={
-            'X-API-Key': api_key,
-            'Content-Type': 'application/json'
-        },
-        json=payload
-    )
-
-    if response.status_code != 200:
-        return f":x: Tiliter API error {response.status_code}: {response.text}"
-
-    try:
-        result = response.json().get("result", {})
-        print("✅ Tiliter API response:")
-        print(json.dumps(result, indent=2))
-
-        merchant = result.get("merchant", "Unknown")
-        total = result.get("total", "N/A")
-        date = result.get("date", "N/A")
-        address = result.get("address", "")
-        currency = result.get("currency", "")
-
-        items = result.get("items", [])
-        item_lines = "\n".join([
-            f"• {item.get('name', 'Unnamed')} — {item.get('price') or 'N/A'}{currency or ''}"
-            for item in items
-        ]) if items else "_No items detected._"
-
-        return (
-            f"🧾 *Receipt Details:*\n"
-            f"- Merchant: *{merchant or 'Unknown'}*\n"
-            f"- Date: *{date or 'N/A'}*\n"
-            f"- Total: *{total or 'N/A'} {currency or ''}*\n"
-            f"- Address: {address or 'N/A'}\n\n"
-            f"🛒 *Items:*\n{item_lines}"
-        )
-
-    except Exception as e:
-        return f":x: Could not parse Tiliter response:\n{str(e)}"
-
-def post_to_slack(channel, thread_ts, message):
-    print("💬 Posting result back to Slack...")
-    res = requests.post(
-        'https://slack.com/api/chat.postMessage',
-        headers={
-            'Authorization': f'Bearer {SLACK_TOKEN}',
-            'Content-Type': 'application/json'
-        },
-        json={
-            'channel': channel,
-            'thread_ts': thread_ts,
-            'text': message
-        }
-    )
-    print("🔁 Slack API response:", res.status_code, res.text)
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    print("📤 Sending to Tili
