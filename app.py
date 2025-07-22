@@ -61,7 +61,7 @@ def slack_events():
                 event.get("channel"),
                 event.get("ts"),
                 ":warning: You haven’t set your Tiliter API key yet.\n\n"
-                "Please visit https://ai.vision.tiliter.com to purchase credits and copy your API key. Then run:\n"
+                "Please visit https://ai.vision.tiliter.com to purchase credits and copy your API key. Then run following command on Slack:\n"
                 "`/set-apikey YOUR_KEY`"
             )
         return make_response("No API key", 200)
@@ -124,4 +124,63 @@ def handle_image(image_url, api_key):
         "image_data": f"data:image/jpeg;base64,{image_b64}"
     }
 
-    print("📤 Sending to Tili
+    print("📤 Sending to Tiliter API...")
+    response = requests.post(
+        TILITER_URL,
+        headers={
+            'X-API-Key': api_key,
+            'Content-Type': 'application/json'
+        },
+        json=payload
+    )
+
+    if response.status_code != 200:
+        return f":x: Tiliter API error {response.status_code}: {response.text}"
+
+    try:
+        result = response.json().get("result", {})
+        print("✅ Tiliter API response:")
+        print(json.dumps(result, indent=2))
+
+        merchant = result.get("merchant", "Unknown")
+        total = result.get("total", "N/A")
+        date = result.get("date", "N/A")
+        address = result.get("address", "")
+        currency = result.get("currency", "")
+
+        items = result.get("items", [])
+        item_lines = "\n".join([
+            f"• {item.get('name', 'Unnamed')} — {item.get('price') or 'N/A'}{currency or ''}"
+            for item in items
+        ]) if items else "_No items detected._"
+
+        return (
+            f"🧾 *Receipt Details:*\n"
+            f"- Merchant: *{merchant or 'Unknown'}*\n"
+            f"- Date: *{date or 'N/A'}*\n"
+            f"- Total: *{total or 'N/A'} {currency or ''}*\n"
+            f"- Address: {address or 'N/A'}\n\n"
+            f"🛒 *Items:*\n{item_lines}"
+        )
+
+    except Exception as e:
+        return f":x: Could not parse Tiliter response:\n{str(e)}"
+
+def post_to_slack(channel, thread_ts, message):
+    print("💬 Posting result back to Slack...")
+    res = requests.post(
+        'https://slack.com/api/chat.postMessage',
+        headers={
+            'Authorization': f'Bearer {SLACK_TOKEN}',
+            'Content-Type': 'application/json'
+        },
+        json={
+            'channel': channel,
+            'thread_ts': thread_ts,
+            'text': message
+        }
+    )
+    print("🔁 Slack API response:", res.status_code, res.text)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
