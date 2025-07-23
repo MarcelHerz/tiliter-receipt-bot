@@ -2,13 +2,15 @@ import os
 import json
 import base64
 import requests
-from flask import Flask, request, make_response
+from flask import Flask, request, make_response, redirect
 from upstash_redis import Redis
 
 app = Flask(__name__)
 
 # === CONFIGURATION ===
 SLACK_TOKEN = os.environ.get("SLACK_TOKEN")
+SLACK_CLIENT_ID = os.environ.get("SLACK_CLIENT_ID")
+SLACK_CLIENT_SECRET = os.environ.get("SLACK_CLIENT_SECRET")
 REDIS_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
 REDIS_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 TILITER_URL = "https://api.ai.vision.tiliter.com/api/v1/inference/receipt-processor"
@@ -22,6 +24,35 @@ processed_event_ids = set()
 @app.route("/")
 def health():
     return "Slack bot is running.", 200
+
+@app.route("/install")
+def install():
+    slack_url = (
+        "https://slack.com/oauth/v2/authorize"
+        f"?client_id={SLACK_CLIENT_ID}"
+        "&scope=commands,files:read,chat:write"
+        "&user_scope="
+    )
+    return redirect(slack_url)
+
+@app.route("/oauth/callback")
+def oauth_callback():
+    code = request.args.get("code")
+    if not code:
+        return "Missing code", 400
+
+    response = requests.post("https://slack.com/api/oauth.v2.access", data={
+        "client_id": SLACK_CLIENT_ID,
+        "client_secret": SLACK_CLIENT_SECRET,
+        "code": code
+    })
+
+    if response.status_code != 200 or not response.json().get("ok"):
+        print("❌ OAuth error:", response.text)
+        return "OAuth failed", 400
+
+    print("✅ App installed:", response.json())
+    return "App installed successfully! You can now use the Tiliter bot in your Slack workspace."
 
 @app.route("/events", methods=["POST"])
 def slack_events():
@@ -38,12 +69,10 @@ def slack_events():
     event_type = event.get("type")
     subtype = event.get("subtype")
 
-    # Avoid duplicates
     if event_id in processed_event_ids:
         return make_response("Duplicate", 200)
     processed_event_ids.add(event_id)
 
-    # Only handle file_shared image messages (ignores text, bots, etc.)
     if event_type == "message" and subtype == "file_share":
         if "bot_id" in event:
             return make_response("Ignore bot", 200)
@@ -88,6 +117,8 @@ def get_api_key():
     user_id = request.form.get("user_id")
     api_key = redis.get(f"key:{user_id}")
     if api_key:
+        if isinstance(api_key, bytes):
+            api_key = api_key.decode()
         return make_response(f"🔐 Your current API key is:\n```{api_key}```", 200)
     return make_response("❌ No API key set.", 200)
 
