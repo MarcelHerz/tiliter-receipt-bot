@@ -69,6 +69,7 @@ def oauth_callback():
         print("❌ OAuth error:", response.text)
         return "OAuth failed", 400
 
+    print(f"[METRIC] New app install: team_id={response.json().get('team', {}).get('id')}")
     print("✅ App installed:", response.json())
     return "App installed successfully! You can now use the Tiliter bot in your Slack workspace."
 
@@ -99,6 +100,7 @@ def slack_events():
             warn_key = f"warned:{user_id}:{event.get('ts')}"
             if not redis.get(warn_key):
                 redis.set(warn_key, "1", ex=3600)
+                print(f"[WARN] No API key for user: {user_id}")
                 post_to_slack(
                     event.get("channel"),
                     event.get("ts"),
@@ -111,6 +113,7 @@ def slack_events():
 
         for file in event.get("files", []):
             if file.get("mimetype", "").startswith("image/"):
+                print(f"[EVENT] Image upload received by user {user_id} in channel {event.get('channel')}")
                 image_url = file["url_private"]
                 result = handle_image(image_url, api_key)
                 post_to_slack(event["channel"], event["ts"], result)
@@ -128,12 +131,14 @@ def set_api_key():
         return make_response("Usage: /set-apikey YOUR_KEY", 200)
 
     redis.set(f"key:{user_id}", text)
+    print(f"[METRIC] API key SET for user: {user_id}")
     return make_response("✅ Tiliter API key saved successfully.", 200)
 
 @app.route("/get-apikey", methods=["POST"])
 def get_api_key():
     verify_slack_request(request)
     user_id = request.form.get("user_id")
+    print(f"[METRIC] API key GET for user: {user_id}")
     api_key = redis.get(f"key:{user_id}")
     if api_key:
         if isinstance(api_key, bytes):
@@ -146,11 +151,14 @@ def delete_api_key():
     verify_slack_request(request)
     user_id = request.form.get("user_id")
     redis.delete(f"key:{user_id}")
+    print(f"[METRIC] API key DELETE for user: {user_id}")
     return make_response("🗑️ Tiliter API key removed.", 200)
 
 def handle_image(image_url, api_key):
+    print("⬇️ Downloading image from Slack...")
     image_response = requests.get(image_url, headers={'Authorization': f'Bearer {SLACK_TOKEN}'})
     if image_response.status_code != 200:
+        print(f"[ERROR] Failed to download image from Slack. Status: {image_response.status_code}")
         return f":x: Failed to download image. Status: {image_response.status_code}"
 
     image_b64 = base64.b64encode(image_response.content).decode('utf-8')
@@ -158,6 +166,7 @@ def handle_image(image_url, api_key):
         "image_data": f"data:image/jpeg;base64,{image_b64}"
     }
 
+    print("📤 Sending to Tiliter API...")
     response = requests.post(
         TILITER_URL,
         headers={'X-API-Key': api_key, 'Content-Type': 'application/json'},
@@ -165,10 +174,14 @@ def handle_image(image_url, api_key):
     )
 
     if response.status_code != 200:
+        print(f"[ERROR] Tiliter API error {response.status_code}: {response.text}")
         return f":x: Tiliter API error {response.status_code}: {response.text}"
 
     try:
         result = response.json().get("result", {})
+        print("✅ Tiliter API response:")
+        print(json.dumps(result, indent=2))
+
         merchant = result.get("merchant", "Unknown")
         total = result.get("total", "N/A")
         date = result.get("date", "N/A")
@@ -190,6 +203,7 @@ def handle_image(image_url, api_key):
             f":shopping_trolley: *Items:*\n{item_lines}"
         )
     except Exception as e:
+        print(f"[ERROR] Exception in parsing Tiliter response: {str(e)}")
         return f":x: Could not parse Tiliter response:\n{str(e)}"
 
 def post_to_slack(channel, thread_ts, message):
