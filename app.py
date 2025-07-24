@@ -11,7 +11,6 @@ from upstash_redis import Redis
 app = Flask(__name__)
 
 # === CONFIGURATION ===
-SLACK_TOKEN = os.environ.get("SLACK_TOKEN")
 SLACK_CLIENT_ID = os.environ.get("SLACK_CLIENT_ID")
 SLACK_CLIENT_SECRET = os.environ.get("SLACK_CLIENT_SECRET")
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
@@ -69,8 +68,13 @@ def oauth_callback():
         print("❌ OAuth error:", response.text)
         return "OAuth failed", 400
 
-    print(f"[METRIC] New app install: team_id={response.json().get('team', {}).get('id')}")
-    print("✅ App installed:", response.json())
+    json_resp = response.json()
+    team_id = json_resp["team"]["id"]
+    access_token = json_resp["access_token"]
+
+    redis.set(f"token:{team_id}", access_token)
+
+    print(f"[METRIC] New app install: team_id={team_id}")
     return "App installed successfully! You can now use the Tiliter bot in your Slack workspace."
 
 @app.route("/events", methods=["POST"])
@@ -80,6 +84,11 @@ def slack_events():
 
     if data.get("type") == "url_verification":
         return make_response(data["challenge"], 200, {"Content-Type": "text/plain"})
+
+    team_id = data.get("team_id")
+    bot_token = redis.get(f"token:{team_id}")
+    if isinstance(bot_token, bytes):
+        bot_token = bot_token.decode()
 
     event = data.get("event", {})
     event_id = data.get("event_id")
@@ -101,10 +110,9 @@ def slack_events():
             if not redis.get(warn_key):
                 redis.set(warn_key, "1", ex=3600)
                 print(f"[WARN] No API key for user: {user_id}")
-                post_to_slack(
-                    event.get("channel"),
-                    event.get("ts"),
-                    ":warning: You haven’t set your Tiliter API key yet.\n\nVisit https://ai.vision.tiliter.com to purchase credits, then use `/set-apikey YOUR_KEY` to activate."
+                post_to_slack(event.get("channel"), event.get("ts"),
+                    ":warning: You haven’t set your Tiliter API key yet.\n\nVisit https://ai.vision.tiliter.com to purchase credits, then use `/set-apikey YOUR_KEY` to activate.",
+                    bot_token
                 )
             return make_response("No API key", 200)
 
@@ -115,8 +123,8 @@ def slack_events():
             if file.get("mimetype", "").startswith("image/"):
                 print(f"[EVENT] Image upload received by user {user_id} in channel {event.get('channel')}")
                 image_url = file["url_private"]
-                result = handle_image(image_url, api_key)
-                post_to_slack(event["channel"], event["ts"], result)
+                result = handle_image(image_url, api_key, bot_token)
+                post_to_slack(event["channel"], event["ts"], result, bot_token)
 
     return make_response("OK", 200)
 
@@ -154,17 +162,15 @@ def delete_api_key():
     print(f"[METRIC] API key DELETE for user: {user_id}")
     return make_response("🗑️ Tiliter API key removed.", 200)
 
-def handle_image(image_url, api_key):
+def handle_image(image_url, api_key, bot_token):
     print("⬇️ Downloading image from Slack...")
-    image_response = requests.get(image_url, headers={'Authorization': f'Bearer {SLACK_TOKEN}'})
+    image_response = requests.get(image_url, headers={'Authorization': f'Bearer {bot_token}'})
     if image_response.status_code != 200:
         print(f"[ERROR] Failed to download image from Slack. Status: {image_response.status_code}")
         return f":x: Failed to download image. Status: {image_response.status_code}"
 
     image_b64 = base64.b64encode(image_response.content).decode('utf-8')
-    payload = {
-        "image_data": f"data:image/jpeg;base64,{image_b64}"
-    }
+    payload = { "image_data": f"data:image/jpeg;base64,{image_b64}" }
 
     print("📤 Sending to Tiliter API...")
     response = requests.post(
@@ -206,11 +212,11 @@ def handle_image(image_url, api_key):
         print(f"[ERROR] Exception in parsing Tiliter response: {str(e)}")
         return f":x: Could not parse Tiliter response:\n{str(e)}"
 
-def post_to_slack(channel, thread_ts, message):
+def post_to_slack(channel, thread_ts, message, bot_token):
     res = requests.post(
         'https://slack.com/api/chat.postMessage',
         headers={
-            'Authorization': f'Bearer {SLACK_TOKEN}',
+            'Authorization': f'Bearer {bot_token}',
             'Content-Type': 'application/json'
         },
         json={
