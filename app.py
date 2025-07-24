@@ -11,6 +11,7 @@ from upstash_redis import Redis
 app = Flask(__name__)
 
 # === CONFIGURATION ===
+SLACK_TOKEN = os.environ.get("SLACK_TOKEN")
 SLACK_CLIENT_ID = os.environ.get("SLACK_CLIENT_ID")
 SLACK_CLIENT_SECRET = os.environ.get("SLACK_CLIENT_SECRET")
 SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
@@ -87,6 +88,9 @@ def slack_events():
 
     team_id = data.get("team_id")
     bot_token = redis.get(f"token:{team_id}")
+    if not bot_token:
+        bot_token = SLACK_TOKEN  # fallback to static token
+        print(f"[WARN] No stored bot token for team_id={team_id}. Using fallback SLACK_TOKEN.")
     if isinstance(bot_token, bytes):
         bot_token = bot_token.decode()
 
